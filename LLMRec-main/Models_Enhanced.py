@@ -108,37 +108,53 @@ class EnhancedGNNLayer(nn.Module):
         """
         Enhanced forward pass with item-specific graphs and multi-modal features
         Args:
-            graphs: item-specific feature interaction graphs
-            feature_emb: base feature embeddings
+            graphs: item-specific feature interaction graphs [batch, num_features, num_features]
+            feature_emb: base feature embeddings [batch, embedding_dim] or [batch, num_features, embedding_dim]
             modal_features: dict containing 'image' and 'text' features
         """
-        h = feature_emb
-        final_h = feature_emb
+        # Ensure feature_emb has correct shape [batch, num_features, embedding_dim]
+        if len(feature_emb.shape) == 2:
+            # If 2D, assume it's [batch, embedding_dim] and expand to [batch, 1, embedding_dim]
+            h = feature_emb.unsqueeze(1)
+        else:
+            h = feature_emb
+            
+        final_h = h
         
         for i in range(self.gnn_layers):
             # Apply item-specific feature interaction (from EmerG)
-            if graphs is not None:
+            if graphs is not None and len(h.shape) == 3:
                 # Use the generated graphs for feature interaction
                 graph = graphs[i] if isinstance(graphs, list) else graphs
-                a = torch.bmm(graph, h)
+                if graph.shape[0] == h.shape[0]:  # Check batch size match
+                    a = torch.bmm(graph, h)
+                else:
+                    # If batch sizes don't match, use linear transformation
+                    a = self.feature_interaction_layers[i](h.squeeze(1) if h.shape[1] == 1 else h.mean(dim=1))
+                    a = a.unsqueeze(1) if len(a.shape) == 2 else a
             else:
                 # Fallback to linear transformation
-                a = self.feature_interaction_layers[i](h)
+                input_feat = h.squeeze(1) if h.shape[1] == 1 else h.mean(dim=1)
+                a = self.feature_interaction_layers[i](input_feat)
+                a = a.unsqueeze(1)
             
             if i != self.gnn_layers - 1:
                 a = self.relu(a)
             
             # Multi-modal feature fusion (enhanced from LLMRec)
-            if modal_features is not None:
-                # Concatenate ID, image, and text features
-                if len(modal_features) >= 2:  # image and text available
-                    fused_features = torch.cat([
-                        a, 
-                        modal_features.get('image', torch.zeros_like(a)),
-                        modal_features.get('text', torch.zeros_like(a))
-                    ], dim=-1)
-                    a = self.modal_fusion[i](fused_features)
-                    a = self.dropout(a)
+            if modal_features is not None and len(modal_features) >= 2:
+                # Ensure all features have same shape for concatenation
+                a_flat = a.squeeze(1) if a.shape[1] == 1 else a.mean(dim=1)
+                
+                # Get modal features and ensure they match a_flat shape
+                image_feat = modal_features.get('image', torch.zeros_like(a_flat))
+                text_feat = modal_features.get('text', torch.zeros_like(a_flat))
+                
+                # Concatenate features
+                fused_features = torch.cat([a_flat, image_feat, text_feat], dim=-1)
+                a = self.modal_fusion[i](fused_features)
+                a = self.dropout(a)
+                a = a.unsqueeze(1)  # Add back feature dimension
             
             # Residual connection
             if self.use_residual:
@@ -147,6 +163,10 @@ class EnhancedGNNLayer(nn.Module):
             else:
                 h = a
                 final_h = a
+        
+        # Return in the expected shape [batch, embedding_dim]
+        if len(final_h.shape) == 3:
+            final_h = final_h.squeeze(1) if final_h.shape[1] == 1 else final_h.mean(dim=1)
         
         return final_h
 
@@ -383,52 +403,49 @@ class MM_Model_Enhanced(nn.Module):
 
         # Enhanced GNN propagation with item-specific graphs (if enabled)
         if self.graph_generator is not None and self.enhanced_gnn is not None:
-            enhanced_features = []
-            
-            # Generate item-specific graphs for a sample of items (to manage computational cost)
-            sample_items = torch.randint(0, self.n_items, (min(512, self.n_items),)).cuda()
-            item_specific_feats = self.generate_item_specific_features(sample_items)
-            item_graphs = self.graph_generator(item_specific_feats)
-            
-            # Apply enhanced GNN to multi-modal features
-            modal_dict = {'image': image_feats, 'text': text_feats}
-            
-            # Process each modality through enhanced GNN
-            for modality in ['image', 'text']:
-                modal_feat = modal_dict[modality]
+            try:
+                # Generate item-specific graphs for a sample of items (to manage computational cost)
+                sample_size = min(256, self.n_items)  # Reduce sample size for stability
+                sample_items = torch.randint(0, self.n_items, (sample_size,)).cuda()
+                item_specific_feats = self.generate_item_specific_features(sample_items)
+                item_graphs = self.graph_generator(item_specific_feats)
                 
-                # Prepare features for GNN (add batch dimension if needed)
-                if len(modal_feat.shape) == 2:
-                    modal_feat = modal_feat.unsqueeze(1)  # Add feature dimension
+                # Apply attention enhancement to original features
+                enhanced_image_feats = image_feats
+                enhanced_text_feats = text_feats
                 
-                # Apply enhanced GNN with item-specific graphs
-                try:
-                    enhanced_modal_feat = self.enhanced_gnn(
-                        item_graphs[:modal_feat.shape[0]] if item_graphs.shape[0] >= modal_feat.shape[0] else None,
-                        modal_feat,
-                        modal_dict
-                    )
-                    
-                    # Apply multi-head attention for further enhancement
-                    if self.multi_head_attention is not None and len(enhanced_modal_feat.shape) == 3:
-                        enhanced_modal_feat = self.multi_head_attention(enhanced_modal_feat)
-                        enhanced_modal_feat = enhanced_modal_feat.squeeze(1)
-                    
-                    enhanced_features.append(enhanced_modal_feat)
-                except Exception as e:
-                    # Fallback to original features if enhanced GNN fails
-                    print(f"Enhanced GNN failed for {modality}, using original features: {e}")
-                    enhanced_features.append(modal_feat)
+                if self.multi_head_attention is not None:
+                    # Prepare features for attention [batch, seq_len, embed_dim]
+                    stacked_feats = torch.stack([image_feats, text_feats], dim=1)  # [n_items, 2, embed_size]
+                    attended_feats = self.multi_head_attention(stacked_feats)  # [n_items, 2, embed_size]
+                    enhanced_image_feats = attended_feats[:, 0, :]
+                    enhanced_text_feats = attended_feats[:, 1, :]
+                
+                enhanced_features = [enhanced_image_feats, enhanced_text_feats]
+                
+            except Exception as e:
+                print(f"Enhanced GNN processing failed, using original features: {e}")
+                enhanced_features = [image_feats, text_feats]
         else:
             # Use original features if enhanced GNN is disabled
             enhanced_features = [image_feats, text_feats]
 
         # Original LLMRec graph propagation (preserved)
+        # Ensure enhanced_features have correct shape for sparse matrix multiplication
+        image_feats_for_prop = enhanced_features[0]
+        text_feats_for_prop = enhanced_features[1]
+        
+        # Ensure features are 2D [n_items, embed_size] for sparse mm
+        if len(image_feats_for_prop.shape) != 2:
+            image_feats_for_prop = image_feats_for_prop.view(self.n_items, -1)
+        if len(text_feats_for_prop.shape) != 2:
+            text_feats_for_prop = text_feats_for_prop.view(self.n_items, -1)
+        
         for i in range(args.layers):
-            image_user_feats = self.mm(ui_graph, enhanced_features[0])  # Use enhanced image features
+            image_user_feats = self.mm(ui_graph, image_feats_for_prop)  # Use enhanced image features
             image_item_feats = self.mm(iu_graph, image_user_feats)
 
-            text_user_feats = self.mm(ui_graph, enhanced_features[1])   # Use enhanced text features
+            text_user_feats = self.mm(ui_graph, text_feats_for_prop)   # Use enhanced text features
             text_item_feats = self.mm(iu_graph, text_user_feats)
 
         # Aug item attribute (original LLMRec)
