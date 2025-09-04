@@ -24,7 +24,8 @@ os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 from utility.parser import parse_args
-from Models import MM_Model, Decoder  
+from Models import MM_Model, Decoder
+from Models_EmerG_Lite import MM_Model_EmerG_Lite  
 from utility.batch_test import *
 from utility.logging import Logger
 from utility.norm import build_sim, build_knn_normalized_graph
@@ -92,7 +93,13 @@ class Trainer(object):
         self.image_ui_graph = self.text_ui_graph = self.ui_graph
         self.image_iu_graph = self.text_iu_graph = self.iu_graph
 
-        self.model_mm = MM_Model(self.n_users, self.n_items, self.emb_dim, self.weight_size, self.mess_dropout, self.image_feats, self.text_feats, self.user_init_embedding, self.item_attribute_embedding)      
+        # Choose model based on enhancement flag
+        if getattr(args, 'use_enhanced_gnn', False):
+            print("🚀 Using EmerG Lite Enhanced Model")
+            self.model_mm = MM_Model_EmerG_Lite(self.n_users, self.n_items, self.emb_dim, self.weight_size, self.mess_dropout, self.image_feats, self.text_feats, self.user_init_embedding, self.item_attribute_embedding)      
+        else:
+            print("📊 Using Original Model")
+            self.model_mm = MM_Model(self.n_users, self.n_items, self.emb_dim, self.weight_size, self.mess_dropout, self.image_feats, self.text_feats, self.user_init_embedding, self.item_attribute_embedding)      
         self.model_mm = self.model_mm.cuda()  
         self.decoder = Decoder(self.user_init_embedding.shape[1]).cuda()
 
