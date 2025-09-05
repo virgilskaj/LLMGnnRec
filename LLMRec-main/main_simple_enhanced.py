@@ -24,8 +24,7 @@ os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 from utility.parser import parse_args
-from Models import MM_Model, Decoder
-from Models_EmerG_Lite import MM_Model_EmerG_Lite  
+from Models_Simple_Enhanced import MM_Model_Simple_Enhanced, Decoder  # Use simplified enhanced model
 from utility.batch_test import *
 from utility.logging import Logger
 from utility.norm import build_sim, build_knn_normalized_graph
@@ -33,13 +32,13 @@ from utility.norm import build_sim, build_knn_normalized_graph
 args = parse_args()
 
 
-class Trainer(object):
+class SimpleEnhancedTrainer(object):
     def __init__(self, data_config):
         # 修改时间格式（替换冒号和空格）
-        self.task_name = "%s_%s_%s" % (datetime.now().strftime('%Y-%m-%d_%H-%M-%S'), args.dataset, args.cf_model)
-        # self.task_name = "%s_%s_%s" % (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), args.dataset, args.cf_model,)
+        self.task_name = "%s_%s_%s_simple_enhanced" % (datetime.now().strftime('%Y-%m-%d_%H-%M-%S'), args.dataset, args.cf_model)
         self.logger = Logger(filename=self.task_name, is_debug=args.debug)
         self.logger.logging("PID: %d" % os.getpid())
+        self.logger.logging("Simple Enhanced Model with EmerG-inspired Item Attention")
         self.logger.logging(str(args))
 
         self.mess_dropout = eval(args.mess_dropout)
@@ -57,7 +56,8 @@ class Trainer(object):
         self.text_feat_dim = self.text_feats.shape[-1]
 
         self.ui_graph = self.ui_graph_raw = pickle.load(open(args.data_path + args.dataset + '/train_mat','rb'))
-        # get user embedding  
+        
+        # Load user embeddings
         augmented_user_init_embedding = pickle.load(open(args.data_path + args.dataset + '/augmented_user_init_embedding','rb'))
         augmented_user_init_embedding_list = []
         for i in range(len(augmented_user_init_embedding)):
@@ -65,10 +65,10 @@ class Trainer(object):
         augmented_user_init_embedding_final = np.array(augmented_user_init_embedding_list)
         pickle.dump(augmented_user_init_embedding_final, open(args.data_path + args.dataset + '/augmented_user_init_embedding_final','wb'))
         self.user_init_embedding = pickle.load(open(args.data_path + args.dataset + '/augmented_user_init_embedding_final','rb'))
-        # get separate embedding matrix 
+        
+        # Load item attribute embeddings
         if args.dataset=='preprocessed_raw_MovieLens':
             augmented_total_embed_dict = {'title':[] , 'genre':[], 'director':[], 'country':[], 'language':[]}   
-        # elif args.dataset=='netflix_valid_item':
         elif args.dataset == 'netflix':
             augmented_total_embed_dict = {'year':[] , 'title':[], 'director':[], 'country':[], 'language':[]}   
         augmented_atttribute_embedding_dict = pickle.load(open(args.data_path + args.dataset + '/augmented_atttribute_embedding_dict','rb'))
@@ -93,30 +93,25 @@ class Trainer(object):
         self.image_ui_graph = self.text_ui_graph = self.ui_graph
         self.image_iu_graph = self.text_iu_graph = self.iu_graph
 
-        # Choose model based on enhancement flag
-        if getattr(args, 'use_enhanced_gnn', False):
-            print("🚀 Using EmerG Lite Enhanced Model")
-            self.model_mm = MM_Model_EmerG_Lite(self.n_users, self.n_items, self.emb_dim, self.weight_size, self.mess_dropout, self.image_feats, self.text_feats, self.user_init_embedding, self.item_attribute_embedding)      
-        else:
-            print("📊 Using Original Model")
-            self.model_mm = MM_Model(self.n_users, self.n_items, self.emb_dim, self.weight_size, self.mess_dropout, self.image_feats, self.text_feats, self.user_init_embedding, self.item_attribute_embedding)      
+        # Use simplified enhanced model
+        self.model_mm = MM_Model_Simple_Enhanced(
+            self.n_users, self.n_items, self.emb_dim, self.weight_size, 
+            self.mess_dropout, self.image_feats, self.text_feats, 
+            self.user_init_embedding, self.item_attribute_embedding
+        )      
         self.model_mm = self.model_mm.cuda()  
         self.decoder = Decoder(self.user_init_embedding.shape[1]).cuda()
 
-
-        self.optimizer = optim.AdamW(
-        [
-            {'params':self.model_mm.parameters()},      
-        ]
-            , lr=self.lr)  
+        # Optimizer
+        self.optimizer = optim.AdamW([
+            {'params': self.model_mm.parameters()},      
+        ], lr=self.lr, weight_decay=getattr(args, 'weight_decay', 1e-4))  
         
-        self.de_optimizer = optim.AdamW(
-        [
-            {'params':self.decoder.parameters()},      
-        ]
-            , lr=args.de_lr)  
+        self.de_optimizer = optim.AdamW([
+            {'params': self.decoder.parameters()},      
+        ], lr=args.de_lr)  
 
-
+        self.logger.logging("Simple Enhanced model initialized successfully")
 
     def csr_norm(self, csr_mat, mean_flag=False):
         rowsum = np.array(csr_mat.sum(1))
@@ -134,11 +129,11 @@ class Trainer(object):
 
     def matrix_to_tensor(self, cur_matrix):
         if type(cur_matrix) != sp.coo_matrix:
-            cur_matrix = cur_matrix.tocoo()  #
-        indices = torch.from_numpy(np.vstack((cur_matrix.row, cur_matrix.col)).astype(np.int64))  #
-        values = torch.from_numpy(cur_matrix.data)  #
+            cur_matrix = cur_matrix.tocoo()
+        indices = torch.from_numpy(np.vstack((cur_matrix.row, cur_matrix.col)).astype(np.int64))
+        values = torch.from_numpy(cur_matrix.data)
         shape = torch.Size(cur_matrix.shape)
-        return torch.sparse.FloatTensor(indices, values, shape).to(torch.float32).cuda()  #
+        return torch.sparse.FloatTensor(indices, values, shape).to(torch.float32).cuda()
 
     def innerProduct(self, u_pos, i_pos, u_neg, j_neg):  
         pred_i = torch.sum(torch.mul(u_pos,i_pos), dim=-1) 
@@ -189,12 +184,14 @@ class Trainer(object):
     def test(self, users_to_test, is_val):
         self.model_mm.eval()
         with torch.no_grad():
-            ua_embeddings, ia_embeddings, *rest = self.model_mm(self.ui_graph, self.iu_graph, self.image_ui_graph, self.image_iu_graph, self.text_ui_graph, self.text_iu_graph)
+            ua_embeddings, ia_embeddings, *rest = self.model_mm(
+                self.ui_graph, self.iu_graph, self.image_ui_graph, 
+                self.image_iu_graph, self.text_ui_graph, self.text_iu_graph
+            )
         result = test_torch(ua_embeddings, ia_embeddings, users_to_test, is_val)
         return result
 
     def train(self):
-
         now_time = datetime.now()
         run_time = datetime.strftime(now_time,'%Y_%m_%d__%H_%M_%S')
 
@@ -203,6 +200,9 @@ class Trainer(object):
 
         n_batch = data_generator.n_train // args.batch_size + 1
         best_recall = 0
+        
+        self.logger.logging("Starting simple enhanced training with EmerG-inspired attention...")
+        
         for epoch in range(args.epoch):
             t1 = time()
             loss, mf_loss, emb_loss, reg_loss = 0., 0., 0., 0.
@@ -219,7 +219,7 @@ class Trainer(object):
                 sample_t1 = time()
                 users, pos_items, neg_items = data_generator.sample()
 
-                # augment samples 
+                # Augment samples (original LLMRec logic)
                 augmented_sample_dict = pickle.load(open(args.data_path + args.dataset + '/augmented_sample_dict','rb'))
                 users_aug = random.sample(users, int(len(users)*args.aug_sample_rate))
                 pos_items_aug = [augmented_sample_dict[user][0] for user in users_aug if (augmented_sample_dict[user][0]<self.n_items and augmented_sample_dict[user][1]<self.n_items)]
@@ -230,8 +230,9 @@ class Trainer(object):
                 pos_items += pos_items_aug
                 neg_items += neg_items_aug
 
-
                 sample_time += time() - sample_t1       
+                
+                # Forward pass with simplified enhanced model
                 user_presentation_h, item_presentation_h, image_i_feat, text_i_feat, image_u_feat, text_u_feat \
                                 , user_prof_feat_pre, item_prof_feat_pre, user_prof_feat, item_prof_feat, user_att_feats, item_att_feats, i_mask_nodes, u_mask_nodes \
                         = self.model_mm(self.ui_graph, self.iu_graph, self.image_ui_graph, self.image_iu_graph, self.text_ui_graph, self.text_iu_graph)
@@ -241,7 +242,7 @@ class Trainer(object):
                 i_bpr_neg_emb = item_presentation_h[neg_items]
                 batch_mf_loss, batch_emb_loss, batch_reg_loss = self.bpr_loss(u_bpr_emb, i_bpr_pos_emb, i_bpr_neg_emb)
        
-                # modal feat
+                # Modal feat
                 image_u_bpr_emb = image_u_feat[users]
                 image_i_bpr_pos_emb = image_i_feat[pos_items]
                 image_i_bpr_neg_emb = image_i_feat[neg_items]
@@ -253,7 +254,7 @@ class Trainer(object):
                 mm_mf_loss = image_batch_mf_loss + text_batch_mf_loss
 
                 batch_mf_loss_aug = 0 
-                for index,value in enumerate(item_att_feats):  # 
+                for index,value in enumerate(item_att_feats):
                     u_g_embeddings_aug = user_prof_feat[users]
                     pos_i_g_embeddings_aug = item_att_feats[value][pos_items]
                     neg_i_g_embeddings_aug = item_att_feats[value][neg_items]
@@ -277,11 +278,22 @@ class Trainer(object):
                         for index,value in enumerate(item_att_feats.keys()):  
                             att_re_loss += self.sce_criterion(decoded_i[index], torch.tensor(self.item_attribute_embedding[value][i_mask_nodes]).cuda(), alpha=args.alpha_l)
 
-                batch_loss = batch_mf_loss + batch_emb_loss + batch_reg_loss + feat_emb_loss + args.aug_mf_rate*batch_mf_loss_aug + args.mm_mf_rate*mm_mf_loss + args.att_re_rate*att_re_loss
-                nn.utils.clip_grad_norm_(self.model_mm.parameters(), max_norm=1.0)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      #+ ssl_loss2 #+ batch_contrastive_loss
+                # Enhanced attention regularization
+                attention_reg_loss = 0.0
+                if hasattr(self.model_mm, 'item_attention') and self.model_mm.item_attention is not None:
+                    # Add light regularization for attention parameters
+                    for param in self.model_mm.item_attention.parameters():
+                        attention_reg_loss += torch.norm(param, 2)
+                    attention_reg_loss *= getattr(args, 'graph_reg_weight', 0.01) * 0.1
+
+                batch_loss = (batch_mf_loss + batch_emb_loss + batch_reg_loss + 
+                             feat_emb_loss + args.aug_mf_rate*batch_mf_loss_aug + 
+                             args.mm_mf_rate*mm_mf_loss + args.att_re_rate*att_re_loss + 
+                             attention_reg_loss)
+                
+                nn.utils.clip_grad_norm_(self.model_mm.parameters(), max_norm=1.0)
                 self.optimizer.zero_grad()  
                 batch_loss.backward(retain_graph=False)
-                
                 self.optimizer.step()
 
                 loss += float(batch_loss)
@@ -304,7 +316,7 @@ class Trainer(object):
             t2 = time()
             users_to_test = list(data_generator.test_set.keys())
             users_to_val = list(data_generator.val_set.keys())
-            ret = self.test(users_to_test, is_val=False)  #^-^
+            ret = self.test(users_to_test, is_val=False)
             training_time_list.append(t2 - t1)
 
             t3 = time()
@@ -321,7 +333,7 @@ class Trainer(object):
             if ret['recall'][1] > best_recall:
                 best_recall = ret['recall'][1]
                 test_ret = self.test(users_to_test, is_val=False)
-                self.logger.logging("Test_Recall@%d: %.5f,  precision=[%.5f], ndcg=[%.5f]" % (eval(args.Ks)[1], test_ret['recall'][1], test_ret['precision'][1], test_ret['ndcg'][1]))
+                self.logger.logging("Simple Enhanced Model - Test_Recall@%d: %.5f,  precision=[%.5f], ndcg=[%.5f]" % (eval(args.Ks)[1], test_ret['recall'][1], test_ret['precision'][1], test_ret['ndcg'][1]))
                 stopping_step = 0
             elif stopping_step < args.early_stopping_patience:
                 stopping_step += 1
@@ -329,10 +341,10 @@ class Trainer(object):
             else:
                 self.logger.logging('#####Early stop! #####')
                 break
+        
+        self.logger.logging("Simple enhanced model training completed")
         self.logger.logging(str(test_ret))
-
         return best_recall, run_time 
-
 
     def bpr_loss(self, users, pos_items, neg_items):
         pos_scores = torch.sum(torch.mul(users, pos_items), dim=1)
@@ -348,7 +360,6 @@ class Trainer(object):
         reg_loss = 0.0
         return mf_loss, emb_loss, reg_loss
     
-
     def sparse_mx_to_torch_sparse_tensor(self, sparse_mx):
         """Convert a scipy sparse matrix to a torch sparse tensor."""
         sparse_mx = sparse_mx.tocoo().astype(np.float32)
@@ -372,11 +383,7 @@ if __name__ == '__main__':
     config['n_users'] = data_generator.n_users
     config['n_items'] = data_generator.n_items
 
-    trainer = Trainer(data_config=config)
-    trainer.train()
-
-
-
-
-
-
+    print("Starting Simple Enhanced LLMRec with EmerG-inspired Item Attention")
+    trainer = SimpleEnhancedTrainer(data_config=config)
+    best_recall, run_time = trainer.train()
+    print(f"Training completed. Best recall: {best_recall:.5f}")

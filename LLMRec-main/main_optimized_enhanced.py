@@ -24,8 +24,7 @@ os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 from utility.parser import parse_args
-from Models import MM_Model, Decoder
-from Models_EmerG_Lite import MM_Model_EmerG_Lite  
+from Models_Optimized_Enhanced import MM_Model_Optimized_Enhanced, Decoder  # Use optimized enhanced model
 from utility.batch_test import *
 from utility.logging import Logger
 from utility.norm import build_sim, build_knn_normalized_graph
@@ -33,13 +32,13 @@ from utility.norm import build_sim, build_knn_normalized_graph
 args = parse_args()
 
 
-class Trainer(object):
+class OptimizedEnhancedTrainer(object):
     def __init__(self, data_config):
         # 修改时间格式（替换冒号和空格）
-        self.task_name = "%s_%s_%s" % (datetime.now().strftime('%Y-%m-%d_%H-%M-%S'), args.dataset, args.cf_model)
-        # self.task_name = "%s_%s_%s" % (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), args.dataset, args.cf_model,)
+        self.task_name = "%s_%s_%s_optimized_enhanced" % (datetime.now().strftime('%Y-%m-%d_%H-%M-%S'), args.dataset, args.cf_model)
         self.logger = Logger(filename=self.task_name, is_debug=args.debug)
         self.logger.logging("PID: %d" % os.getpid())
+        self.logger.logging("Optimized Enhanced Model - Preserving LLMRec Performance + EmerG Enhancements")
         self.logger.logging(str(args))
 
         self.mess_dropout = eval(args.mess_dropout)
@@ -57,6 +56,7 @@ class Trainer(object):
         self.text_feat_dim = self.text_feats.shape[-1]
 
         self.ui_graph = self.ui_graph_raw = pickle.load(open(args.data_path + args.dataset + '/train_mat','rb'))
+        
         # get user embedding  
         augmented_user_init_embedding = pickle.load(open(args.data_path + args.dataset + '/augmented_user_init_embedding','rb'))
         augmented_user_init_embedding_list = []
@@ -65,6 +65,7 @@ class Trainer(object):
         augmented_user_init_embedding_final = np.array(augmented_user_init_embedding_list)
         pickle.dump(augmented_user_init_embedding_final, open(args.data_path + args.dataset + '/augmented_user_init_embedding_final','wb'))
         self.user_init_embedding = pickle.load(open(args.data_path + args.dataset + '/augmented_user_init_embedding_final','rb'))
+        
         # get separate embedding matrix 
         if args.dataset=='preprocessed_raw_MovieLens':
             augmented_total_embed_dict = {'title':[] , 'genre':[], 'director':[], 'country':[], 'language':[]}   
@@ -93,30 +94,36 @@ class Trainer(object):
         self.image_ui_graph = self.text_ui_graph = self.ui_graph
         self.image_iu_graph = self.text_iu_graph = self.iu_graph
 
-        # Choose model based on enhancement flag
-        if getattr(args, 'use_enhanced_gnn', False):
-            print("🚀 Using EmerG Lite Enhanced Model")
-            self.model_mm = MM_Model_EmerG_Lite(self.n_users, self.n_items, self.emb_dim, self.weight_size, self.mess_dropout, self.image_feats, self.text_feats, self.user_init_embedding, self.item_attribute_embedding)      
-        else:
-            print("📊 Using Original Model")
-            self.model_mm = MM_Model(self.n_users, self.n_items, self.emb_dim, self.weight_size, self.mess_dropout, self.image_feats, self.text_feats, self.user_init_embedding, self.item_attribute_embedding)      
+        # Use optimized enhanced model
+        self.model_mm = MM_Model_Optimized_Enhanced(
+            self.n_users, self.n_items, self.emb_dim, self.weight_size, 
+            self.mess_dropout, self.image_feats, self.text_feats, 
+            self.user_init_embedding, self.item_attribute_embedding
+        )      
         self.model_mm = self.model_mm.cuda()  
         self.decoder = Decoder(self.user_init_embedding.shape[1]).cuda()
 
-
-        self.optimizer = optim.AdamW(
-        [
-            {'params':self.model_mm.parameters()},      
-        ]
-            , lr=self.lr)  
+        # Optimizer with careful learning rate for enhanced components
+        enhanced_params = []
+        base_params = []
         
-        self.de_optimizer = optim.AdamW(
-        [
-            {'params':self.decoder.parameters()},      
-        ]
-            , lr=args.de_lr)  
+        for name, param in self.model_mm.named_parameters():
+            if 'adaptive_enhancer' in name or 'high_order_interaction' in name or 'enhancement_strength' in name:
+                enhanced_params.append(param)
+            else:
+                base_params.append(param)
 
+        self.optimizer = optim.AdamW([
+            {'params': base_params, 'lr': self.lr},
+            {'params': enhanced_params, 'lr': self.lr * 0.5}  # Lower LR for enhanced components
+        ], weight_decay=getattr(args, 'weight_decay', 1e-4))  
+        
+        self.de_optimizer = optim.AdamW([
+            {'params': self.decoder.parameters()},      
+        ], lr=args.de_lr)  
 
+        self.logger.logging("Optimized Enhanced model initialized successfully")
+        self.logger.logging(f"Base parameters: {len(base_params)}, Enhanced parameters: {len(enhanced_params)}")
 
     def csr_norm(self, csr_mat, mean_flag=False):
         rowsum = np.array(csr_mat.sum(1))
@@ -134,11 +141,11 @@ class Trainer(object):
 
     def matrix_to_tensor(self, cur_matrix):
         if type(cur_matrix) != sp.coo_matrix:
-            cur_matrix = cur_matrix.tocoo()  #
-        indices = torch.from_numpy(np.vstack((cur_matrix.row, cur_matrix.col)).astype(np.int64))  #
-        values = torch.from_numpy(cur_matrix.data)  #
+            cur_matrix = cur_matrix.tocoo()
+        indices = torch.from_numpy(np.vstack((cur_matrix.row, cur_matrix.col)).astype(np.int64))
+        values = torch.from_numpy(cur_matrix.data)
         shape = torch.Size(cur_matrix.shape)
-        return torch.sparse.FloatTensor(indices, values, shape).to(torch.float32).cuda()  #
+        return torch.sparse.FloatTensor(indices, values, shape).to(torch.float32).cuda()
 
     def innerProduct(self, u_pos, i_pos, u_neg, j_neg):  
         pred_i = torch.sum(torch.mul(u_pos,i_pos), dim=-1) 
@@ -189,12 +196,14 @@ class Trainer(object):
     def test(self, users_to_test, is_val):
         self.model_mm.eval()
         with torch.no_grad():
-            ua_embeddings, ia_embeddings, *rest = self.model_mm(self.ui_graph, self.iu_graph, self.image_ui_graph, self.image_iu_graph, self.text_ui_graph, self.text_iu_graph)
+            ua_embeddings, ia_embeddings, *rest = self.model_mm(
+                self.ui_graph, self.iu_graph, self.image_ui_graph, 
+                self.image_iu_graph, self.text_ui_graph, self.text_iu_graph
+            )
         result = test_torch(ua_embeddings, ia_embeddings, users_to_test, is_val)
         return result
 
     def train(self):
-
         now_time = datetime.now()
         run_time = datetime.strftime(now_time,'%Y_%m_%d__%H_%M_%S')
 
@@ -203,10 +212,15 @@ class Trainer(object):
 
         n_batch = data_generator.n_train // args.batch_size + 1
         best_recall = 0
+        
+        self.logger.logging("Starting optimized enhanced training...")
+        self.logger.logging("Target: Beat baseline R@20=0.0829, N@20=0.0347")
+        
         for epoch in range(args.epoch):
             t1 = time()
             loss, mf_loss, emb_loss, reg_loss = 0., 0., 0., 0.
             contrastive_loss = 0.
+            enhancement_loss = 0.
             n_batch = data_generator.n_train // args.batch_size + 1
             sample_time = 0.
             build_item_graph = True
@@ -229,7 +243,6 @@ class Trainer(object):
                 users += users_aug
                 pos_items += pos_items_aug
                 neg_items += neg_items_aug
-
 
                 sample_time += time() - sample_t1       
                 user_presentation_h, item_presentation_h, image_i_feat, text_i_feat, image_u_feat, text_u_feat \
@@ -277,17 +290,25 @@ class Trainer(object):
                         for index,value in enumerate(item_att_feats.keys()):  
                             att_re_loss += self.sce_criterion(decoded_i[index], torch.tensor(self.item_attribute_embedding[value][i_mask_nodes]).cuda(), alpha=args.alpha_l)
 
-                batch_loss = batch_mf_loss + batch_emb_loss + batch_reg_loss + feat_emb_loss + args.aug_mf_rate*batch_mf_loss_aug + args.mm_mf_rate*mm_mf_loss + args.att_re_rate*att_re_loss
-                nn.utils.clip_grad_norm_(self.model_mm.parameters(), max_norm=1.0)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      #+ ssl_loss2 #+ batch_contrastive_loss
+                # Light enhancement regularization (very small to avoid disrupting original performance)
+                enhancement_reg_loss = 0.0
+                if hasattr(self.model_mm, 'enhancement_strength') and self.model_mm.enhancement_strength is not None:
+                    # Encourage moderate enhancement strength (not too strong, not too weak)
+                    target_strength = 0.1
+                    enhancement_reg_loss = 0.001 * (self.model_mm.enhancement_strength - target_strength) ** 2
+
+                batch_loss = batch_mf_loss + batch_emb_loss + batch_reg_loss + feat_emb_loss + args.aug_mf_rate*batch_mf_loss_aug + args.mm_mf_rate*mm_mf_loss + args.att_re_rate*att_re_loss + enhancement_reg_loss
+                
+                nn.utils.clip_grad_norm_(self.model_mm.parameters(), max_norm=1.0)
                 self.optimizer.zero_grad()  
                 batch_loss.backward(retain_graph=False)
-                
                 self.optimizer.step()
 
                 loss += float(batch_loss)
                 mf_loss += float(batch_mf_loss)
                 emb_loss += float(batch_emb_loss)
                 reg_loss += float(batch_reg_loss)
+                enhancement_loss += float(enhancement_reg_loss)
     
             del user_presentation_h, item_presentation_h, u_bpr_emb, i_bpr_neg_emb, i_bpr_pos_emb
 
@@ -295,9 +316,14 @@ class Trainer(object):
                 self.logger.logging('ERROR: loss is nan.')
                 sys.exit()
 
+            # Log enhancement strength
+            if hasattr(self.model_mm, 'enhancement_strength') and self.model_mm.enhancement_strength is not None:
+                current_strength = float(torch.sigmoid(self.model_mm.enhancement_strength))
+                self.logger.logging(f'Enhancement strength: {current_strength:.4f}')
+
             if (epoch + 1) % args.verbose != 0:
-                perf_str = 'Epoch %d [%.1fs]: train==[%.5f=%.5f + %.5f + %.5f  + %.5f]' % (
-                    epoch, time() - t1, loss, mf_loss, emb_loss, reg_loss, contrastive_loss)
+                perf_str = 'Epoch %d [%.1fs]: train==[%.5f=%.5f + %.5f + %.5f + %.5f + %.5f]' % (
+                    epoch, time() - t1, loss, mf_loss, emb_loss, reg_loss, contrastive_loss, enhancement_loss)
                 training_time_list.append(time() - t1)
                 self.logger.logging(perf_str)
 
@@ -318,10 +344,14 @@ class Trainer(object):
                             ret['ndcg'][0], ret['ndcg'][1], ret['ndcg'][2], ret['ndcg'][-1])
                 self.logger.logging(perf_str)
 
+            # Enhanced early stopping with baseline comparison
+            baseline_recall_20 = 0.0829  # Your baseline
             if ret['recall'][1] > best_recall:
                 best_recall = ret['recall'][1]
                 test_ret = self.test(users_to_test, is_val=False)
-                self.logger.logging("Test_Recall@%d: %.5f,  precision=[%.5f], ndcg=[%.5f]" % (eval(args.Ks)[1], test_ret['recall'][1], test_ret['precision'][1], test_ret['ndcg'][1]))
+                improvement = (test_ret['recall'][1] - baseline_recall_20) / baseline_recall_20 * 100
+                self.logger.logging("Optimized Enhanced - Test_Recall@20: %.5f (%.2f%% vs baseline), precision=[%.5f], ndcg=[%.5f]" % 
+                                  (test_ret['recall'][1], improvement, test_ret['precision'][1], test_ret['ndcg'][1]))
                 stopping_step = 0
             elif stopping_step < args.early_stopping_patience:
                 stopping_step += 1
@@ -329,10 +359,13 @@ class Trainer(object):
             else:
                 self.logger.logging('#####Early stop! #####')
                 break
+        
+        self.logger.logging("Optimized enhanced training completed")
+        final_improvement = (test_ret['recall'][1] - baseline_recall_20) / baseline_recall_20 * 100
+        self.logger.logging(f"Final improvement over baseline: {final_improvement:.2f}%")
         self.logger.logging(str(test_ret))
 
         return best_recall, run_time 
-
 
     def bpr_loss(self, users, pos_items, neg_items):
         pos_scores = torch.sum(torch.mul(users, pos_items), dim=1)
@@ -348,7 +381,6 @@ class Trainer(object):
         reg_loss = 0.0
         return mf_loss, emb_loss, reg_loss
     
-
     def sparse_mx_to_torch_sparse_tensor(self, sparse_mx):
         """Convert a scipy sparse matrix to a torch sparse tensor."""
         sparse_mx = sparse_mx.tocoo().astype(np.float32)
@@ -372,11 +404,16 @@ if __name__ == '__main__':
     config['n_users'] = data_generator.n_users
     config['n_items'] = data_generator.n_items
 
-    trainer = Trainer(data_config=config)
-    trainer.train()
-
-
-
-
-
-
+    print("🎯 Starting Optimized Enhanced LLMRec")
+    print("📊 Target: Beat R@20=0.0829, N@20=0.0347")
+    trainer = OptimizedEnhancedTrainer(data_config=config)
+    best_recall, run_time = trainer.train()
+    print(f"🏆 Training completed. Best recall: {best_recall:.5f}")
+    
+    # Compare with baseline
+    baseline_recall_20 = 0.0829
+    improvement = (best_recall - baseline_recall_20) / baseline_recall_20 * 100
+    if improvement > 0:
+        print(f"🚀 SUCCESS! Improved by {improvement:.2f}% over baseline!")
+    else:
+        print(f"📉 Need tuning: {improvement:.2f}% vs baseline")

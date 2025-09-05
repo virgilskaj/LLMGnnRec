@@ -52,5 +52,13 @@ def parse_args():
     parser.add_argument("--alpha_l", type=float, default=2, help="`pow`inddex for `sce` loss")
     parser.add_argument('--aug_sample_rate', type=float, default=0.1, help='Augmentation sample rate')
     parser.add_argument('--mf_emb_rate', type=float, default=0.0, help='MF embedding rate')
+    
+    # Enhanced GNN parameters (EmerG integration)
+    parser.add_argument('--use_enhanced_gnn', type=bool, default=True, help='Use enhanced GNN with item-specific graphs')
+    parser.add_argument('--gnn_layers', type=int, default=3, help='Number of GNN layers for feature interaction')
+    parser.add_argument('--use_attention', type=bool, default=True, help='Use multi-head attention')
+    parser.add_argument('--attention_heads', type=int, default=4, help='Number of attention heads')
+    parser.add_argument('--graph_reg_weight', type=float, default=0.01, help='Graph regularization weight')
+    parser.add_argument('--feature_interaction_weight', type=float, default=0.1, help='Feature interaction loss weight')
 
     return parser.parse_args()
