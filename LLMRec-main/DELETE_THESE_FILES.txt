@@ -1,0 +1,67 @@
+# 🗑️ 可以安全删除的文件列表
+
+# 您的成功命令只需要这些核心文件:
+# main.py, Models.py, Models_EmerG_Lite.py, utility/, data/, requirements.txt
+
+# ==================== 可以删除的文件 ====================
+
+# 1. 实验性模型文件 (18个文件，约200KB)
+Models_Enhanced.py
+Models_Simple_Enhanced.py
+Models_Conservative_Enhanced.py
+Models_Optimized_Enhanced.py
+Models_Final_Optimized.py
+Models_Exact_Enhanced.py
+
+# 2. 实验性训练脚本 (3个文件，约60KB)
+main_enhanced.py
+main_simple_enhanced.py
+main_optimized_enhanced.py
+
+# 3. 调试测试脚本 (8个文件，约80KB)
+test_enhanced_model.py
+validate_baseline.py
+final_performance_test.py
+quick_performance_test.py
+tune_with_fixed_lr.py
+quick_param_test.py
+improve_weak_metrics.py
+hyperparameter_tuning.py
+
+# 4. 运行脚本 (3个文件，约15KB)
+run_comparison.py
+run_fixed_enhanced.py
+run_performance_boost.py
+
+# 5. 文档文件 (8个文件，约50KB) - 可选删除
+ENHANCED_README.md
+INTEGRATION_SUMMARY.md
+QUICK_FIX_GUIDE.md
+PERFORMANCE_BOOST_GUIDE.md
+FINAL_SOLUTION.md
+SUCCESS_REPORT.md
+targeted_tests.md
+FILE_CLEANUP_GUIDE.md
+
+# 6. 缓存和临时文件
+__pycache__/
+venv/
+requirements - 副本.txt
+
+# 7. 可选目录 (如果不需要) - 请谨慎删除
+# MMSSL/                               # 如果不使用MMSSL基线
+# LLM_augmentation_construct_prompt/   # 如果数据已预处理
+
+# ==================== 保留的核心文件 ====================
+# main.py                  ✅ 主训练脚本
+# Models.py                ✅ 原始模型  
+# Models_EmerG_Lite.py     ✅ 成功的增强模型
+# utility/parser.py        ✅ 参数解析
+# utility/batch_test.py    ✅ 评估工具
+# utility/load_data.py     ✅ 数据加载
+# utility/logging.py       ✅ 日志工具
+# utility/metrics.py       ✅ 指标计算
+# utility/norm.py          ✅ 图归一化
+# data/                    ✅ 数据目录
+# requirements.txt         ✅ 依赖列表
+# README.md                ✅ 项目说明 (可选)
